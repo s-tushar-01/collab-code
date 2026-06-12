@@ -14,11 +14,14 @@
     "@monaco-editor/react": "^4.7.0",
     "@vitejs/plugin-react": "^4.3.4",
     "express": "^4.21.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
     "monaco-editor": "^0.52.2",
     "nanoid": "^5.0.9",
     "vite": "^6.0.7",
     "ws": "^8.18.0",
     "y-monaco": "^0.1.6",
+    "y-protocols": "^1.0.7",
     "yjs": "^13.6.21"
   },
   "devDependencies": {

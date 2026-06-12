@@ -7,9 +7,21 @@ import * as Y from 'yjs';
 const PORT = process.env.PORT || 3001;
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ noServer: true });
 
 app.use(express.static('dist'));
+
+app.get('*', (_req, res) => {
+  res.sendFile('dist/index.html', { root: '.' });
+});
+
+server.on('upgrade', (req, socket, head) => {
+  if (req.url === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } else {
+    socket.destroy();
+  }
+});
 
 const rooms = new Map();
 
@@ -17,18 +29,70 @@ const starterFiles = [
   {
     id: 'file-welcome',
     type: 'file',
+    folder: 'src',
     name: 'welcome.js',
-    path: '/welcome.js',
-    content: `function hello(name) {\n  console.log(\`Welcome, \${name}!\`);\n}\n\nhello('collaborators');\n`
+    path: '/src/welcome.js',
+    content: `function hello(name) {\n  const msg = \`Welcome, \${name}!\`;\n  console.log(msg);\n}\n\nfunction add(a, b) {\n  return a + b;\n}\n\nconst user = {\n  id: 1,\n  name: 'Collaborator',\n  role: 'developer'\n};\n\nfor (let i = 0; i < 3; i++) {\n  hello(user.name);\n}\n\nconsole.log('2 + 3 =', add(2, 3));\n`
+  },
+  {
+    id: 'file-app',
+    type: 'file',
+    folder: 'src',
+    name: 'app.ts',
+    path: '/src/app.ts',
+    content: `type Role = 'host' | 'editor' | 'viewer';\n\nexport interface RoomUser {\n  id: string;\n  name: string;\n  role: Role;\n}\n\nexport function canWrite(user: RoomUser) {\n  return user.role === 'host' || user.role === 'editor';\n}\n`
+  },
+  {
+    id: 'file-styles',
+    type: 'file',
+    folder: 'src',
+    name: 'styles.css',
+    path: '/src/styles.css',
+    content: `:root {\n  color-scheme: dark;\n  font-family: Inter, system-ui, sans-serif;\n}\n`
+  },
+  {
+    id: 'file-index',
+    type: 'file',
+    folder: 'src',
+    name: 'index.html',
+    path: '/src/index.html',
+    content: `<!doctype html>\n<html>\n  <body>\n    <main id="app"></main>\n  </body>\n</html>\n`
   },
   {
     id: 'file-notes',
     type: 'file',
+    folder: 'docs',
     name: 'notes.md',
-    path: '/notes.md',
-    content: '# Shared notes\n\nUse the file explorer to add files and collaborate.\n'
+    path: '/docs/notes.md',
+    content: '# Shared notes\n\nUse this room to discuss architecture and implementation decisions.\n'
+  },
+  {
+    id: 'file-api',
+    type: 'file',
+    folder: 'docs',
+    name: 'api.md',
+    path: '/docs/api.md',
+    content: '# Room API\n\n- join\n- room-state\n- y-update\n- cursor\n- chat\n'
+  },
+  {
+    id: 'file-settings',
+    type: 'file',
+    folder: 'config',
+    name: 'settings.json',
+    path: '/config/settings.json',
+    content: '{\n  "editor.tabSize": 2,\n  "collaboration.presence": true\n}\n'
+  },
+  {
+    id: 'file-env',
+    type: 'file',
+    folder: 'config',
+    name: 'env.example',
+    path: '/config/env.example',
+    content: 'PORT=3001\n'
   }
 ];
+
+const starterFolders = ['src', 'docs', 'config'];
 
 function createRoom(roomId) {
   const room = {
@@ -36,7 +100,8 @@ function createRoom(roomId) {
     hostClientId: null,
     clients: new Map(),
     chat: [],
-    files: starterFiles.map(({ content, ...file }) => file),
+    folders: [...starterFolders],
+    files: starterFiles.map(({ content, ...file }) => ({ ...file })),
     docs: new Map(),
     cursors: new Map()
   };
@@ -92,9 +157,17 @@ function syncRoom(room) {
     type: 'room-state',
     hostClientId: room.hostClientId,
     users: publicUsers(room),
+    folders: room.folders,
     files: room.files,
     chat: room.chat.slice(-100)
   });
+}
+
+function roomFileContents(room) {
+  return room.files.map((file) => ({
+    ...file,
+    content: ensureFileDoc(room, file.id).getText('content').toString()
+  }));
 }
 
 function canEdit(room, clientId) {
@@ -109,18 +182,26 @@ function ensureFileDoc(room, fileId) {
   return room.docs.get(fileId);
 }
 
-function uniquePath(room, name) {
-  let candidate = name.startsWith('/') ? name : `/${name}`;
+function uniquePath(room, folder, name, ignoreFileId = null) {
+  const cleanFolder = folder || 'src';
+  let candidate = `/${cleanFolder}/${name}`;
   let suffix = 1;
-  const paths = new Set(room.files.map((file) => file.path));
+  const paths = new Set(room.files.filter((file) => file.id !== ignoreFileId).map((file) => file.path));
   while (paths.has(candidate)) {
     const dot = name.lastIndexOf('.');
     const stem = dot > -1 ? name.slice(0, dot) : name;
     const ext = dot > -1 ? name.slice(dot) : '';
-    candidate = `/${stem}-${suffix}${ext}`;
+    candidate = `/${cleanFolder}/${stem}-${suffix}${ext}`;
     suffix += 1;
   }
   return candidate;
+}
+
+function cleanFolderName(name) {
+  return String(name || 'new-folder')
+    .replace(/[\\/]/g, '')
+    .replace(/\s+/g, '-')
+    .slice(0, 40) || 'new-folder';
 }
 
 wss.on('connection', (ws) => {
@@ -225,13 +306,48 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (message.type === 'name-update') {
+      const client = joinedRoom.clients.get(clientId);
+      if (!client) return;
+      client.name = String(message.name || client.name).slice(0, 32) || client.name;
+      syncRoom(joinedRoom);
+      return;
+    }
+
+    if (message.type === 'workspace-export') {
+      send(ws, {
+        type: 'workspace-export',
+        requestId: message.requestId,
+        roomId: joinedRoom.id,
+        folders: joinedRoom.folders,
+        files: roomFileContents(joinedRoom)
+      });
+      return;
+    }
+
     if (message.type === 'file-create') {
       if (!canEdit(joinedRoom, clientId)) return send(ws, { type: 'permission-denied', reason: 'viewer' });
       const name = String(message.name || 'untitled.txt').replace(/[\\/]/g, '').slice(0, 80) || 'untitled.txt';
-      const path = uniquePath(joinedRoom, name);
-      const file = { id: nanoid(10), type: 'file', name, path };
+      const folder = cleanFolderName(message.folder || joinedRoom.folders[0] || 'src');
+      if (!joinedRoom.folders.includes(folder)) joinedRoom.folders.push(folder);
+      const path = uniquePath(joinedRoom, folder, name);
+      const file = { id: nanoid(10), type: 'file', folder, name, path };
       joinedRoom.files.push(file);
       joinedRoom.docs.set(file.id, new Y.Doc());
+      syncRoom(joinedRoom);
+      return;
+    }
+
+    if (message.type === 'folder-create') {
+      if (!canEdit(joinedRoom, clientId)) return send(ws, { type: 'permission-denied', reason: 'viewer' });
+      const baseName = cleanFolderName(message.name);
+      let name = baseName;
+      let suffix = 1;
+      while (joinedRoom.folders.includes(name)) {
+        name = `${baseName}-${suffix}`;
+        suffix += 1;
+      }
+      joinedRoom.folders.push(name);
       syncRoom(joinedRoom);
       return;
     }
@@ -242,7 +358,20 @@ wss.on('connection', (ws) => {
       if (!file) return;
       const name = String(message.name || file.name).replace(/[\\/]/g, '').slice(0, 80) || file.name;
       file.name = name;
-      file.path = uniquePath(joinedRoom, name);
+      file.path = uniquePath(joinedRoom, file.folder, name, file.id);
+      syncRoom(joinedRoom);
+      return;
+    }
+
+    if (message.type === 'file-move') {
+      if (!canEdit(joinedRoom, clientId)) return send(ws, { type: 'permission-denied', reason: 'viewer' });
+      const file = joinedRoom.files.find((item) => item.id === message.fileId);
+      if (!file) return;
+      const folder = cleanFolderName(message.folder || file.folder || 'src');
+      if (file.folder === folder) return;
+      if (!joinedRoom.folders.includes(folder)) joinedRoom.folders.push(folder);
+      file.folder = folder;
+      file.path = uniquePath(joinedRoom, folder, file.name, file.id);
       syncRoom(joinedRoom);
       return;
     }
