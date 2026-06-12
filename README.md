@@ -55,6 +55,26 @@ npm run dev
 
 Then open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
+## Deployment
+
+The React frontend can be deployed to static hosts such as Vercel, but the live collaboration server needs a Node host that supports WebSocket upgrades and long-running processes.
+
+Deploy the backend with:
+
+```bash
+npm install
+npm run build
+npm start
+```
+
+Then set this environment variable for the frontend build:
+
+```bash
+VITE_WS_URL=wss://your-backend-domain.example/ws
+```
+
+Without `VITE_WS_URL`, a Vercel frontend build will show that the backend is not configured instead of repeatedly trying a missing `/ws` endpoint.
+
 ## Scripts
 
 | Script | Description |

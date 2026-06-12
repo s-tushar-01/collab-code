@@ -31,8 +31,17 @@ import JSZip from 'jszip';
 import { nanoid } from 'nanoid';
 import './styles.css';
 
-const WS_URL = import.meta.env.VITE_WS_URL
-  || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+function getWebSocketUrl() {
+  const configuredUrl = import.meta.env.VITE_WS_URL?.trim();
+  if (configuredUrl) return configuredUrl;
+
+  const isVercelStaticBuild = location.hostname.endsWith('.vercel.app');
+  if (isVercelStaticBuild) return null;
+
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+}
+
+const WS_URL = getWebSocketUrl();
 const COLORS = ['#8b5cf6', '#22c55e', '#f97316', '#ec4899', '#38bdf8', '#facc15', '#14b8a6'];
 
 const EXTENSIONS = {
@@ -157,6 +166,11 @@ function App() {
 
   useEffect(() => {
     if (!entered) return undefined;
+    if (!WS_URL) {
+      setStatus('backend missing');
+      setNotice('Set VITE_WS_URL to a deployed WebSocket backend for live rooms.');
+      return undefined;
+    }
 
     const ws = new WebSocket(WS_URL);
     socketRef.current = ws;
